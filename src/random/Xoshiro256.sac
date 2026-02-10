@@ -76,35 +76,49 @@
  * x            = reshape([n], x_2d);
  * state        = states[0];
  *
- * TODO: In principle we just create a struct State256[L] for L the number
- *       of SIMD-lanes, but struct is not yet mature enough to compile this
- *       efficiently.
- * TODO: The parallel method allocates and copies the rows.
- * TODO: Implement sel and reshape. This gives problems with records.
- *
  ******************************************************************************/
 #pragma safe
-module Xoshiro;
+module Xoshiro256;
 
 use ScalarArith: all;
 use Math: all;
 
 export all except { rotl, splitmix64, srand_time, to_row_major,
-                    reshape, reshapel, prod };
+                    reshape, prod };
 
 struct State256 {
-  ulong s0l;
-  ulong s1l;
-  ulong s2l;
-  ulong s3l;
+  ulong s0;
+  ulong s1;
+  ulong s2;
+  ulong s3;
 };
 
-struct State128 {
-  uint s0;
-  uint s1;
-  uint s2;
-  uint s3;
-};
+//inline
+//struct State256 sel(int[d] iv, struct State256[d:shp] x)
+//{
+//    return _sel_VxA_(iv, x);
+//}
+//
+//
+//inline
+//struct State256 sel(int i, struct State256[n] x)
+//{
+//    return _sel_VxA_([i], x);
+//}
+//
+//inline 
+//struct State256[i:ishp] sel(int[o] idx, struct State256[o:oshp,i:ishp] arr)
+//    | _all_V_(_le_SxV_(0, idx)), _all_V_(_lt_VxV_(idx, oshp))
+//{
+//    return {iv -> _sel_VxA_(_cat_VxV_(idx, iv), arr) | iv < ishp};
+//}
+//
+//inline 
+//struct State256[d:shp] sel(int idx, struct State256[n,d:shp] arr)
+//    | _le_SxS_(0, idx), _lt_SxS_(idx, n)
+//{
+//    return sel([idx], arr);
+//}
 
 inline
 int to_row_major(int[d] iv, int[d] shp)
@@ -119,19 +133,7 @@ int to_row_major(int[d] iv, int[d] shp)
 }
 
 struct State256[d:shp]
-reshapel(int[d] shp, struct State256[n] x)
-{
-#if 0
-  /* Not yet supported on structs. */
-  return _reshape_VxA_(new_shp, x);
-#else
-  res = {iv -> _sel_VxA_([to_row_major(iv, shp)], x) | iv < shp};
-  return res;
-#endif
-}
-
-struct State128[d:shp]
-reshape(int[d] shp, struct State128[n] x)
+reshape(int[d] shp, struct State256[n] x)
 {
 #if 0
   /* Not yet supported on structs. */
@@ -149,122 +151,91 @@ ulong rotl(ulong x, ulong k)
 }
 
 inline
-uint rotl(uint x, uint k)
+ulong[L] rotl(ulong[L] x, ulong k)
 {
-  return (x << k) | (x >> (32u - k));
+  return _bitxor_VxV_(_shl_VxS_(x, k),
+                      _shr_VxS_(x, 64ul - k));
+}
+
+inline
+struct State256 next(struct State256 state)
+{
+  t = state.s1 << 17ul;
+
+  state.s2 = state.s2 ^ state.s0;
+  state.s3 = state.s3 ^ state.s1;
+  state.s1 = state.s1 ^ state.s2;
+  state.s0 = state.s0 ^ state.s3;
+
+  state.s2 = state.s2 ^ t;
+
+  state.s3 = rotl(state.s3, 45ul);
+
+  return state;
+}
+
+inline
+struct State256[L] next(struct State256[L] state)
+{
+  t = _shl_VxS_(state.s1, 17ul);
+
+  state.s2 = _bitxor_VxV_(state.s2, state.s0);
+  state.s3 = _bitxor_VxV_(state.s3, state.s1);
+  state.s1 = _bitxor_VxV_(state.s1, state.s2);
+  state.s0 = _bitxor_VxV_(state.s0, state.s3);
+
+  state.s2 = _bitxor_VxV_(state.s2, t);
+
+  state.s3 = rotl(state.s3, 45ul);
+
+  return state;
 }
 
 inline
 ulong, struct State256 xoshiro256pp(struct State256 state)
 {
-  result = rotl(state.s0l + state.s3l, 23ul) + state.s0l;
+  result = rotl(state.s0 + state.s3, 23ul) + state.s0;
+  state = next(state);
+  return (result, state);
+}
 
-  t = state.s1l << 17ul;
-
-  state.s2l = state.s2l ^ state.s0l;
-  state.s3l = state.s3l ^ state.s1l;
-  state.s1l = state.s1l ^ state.s2l;
-  state.s0l = state.s0l ^ state.s3l;
-
-  state.s2l = state.s2l ^ t;
-
-  state.s3l = rotl(state.s3l, 45ul);
-
+inline
+ulong[L], struct State256[L] xoshiro256pp(struct State256[L] state)
+{
+  result = _add_VxV_(rotl(_add_VxV_(state.s0, state.s3), 23ul), state.s0);
+  state = next(state);
   return (result, state);
 }
 
 inline
 ulong, struct State256 xoshiro256p(struct State256 state)
 {
-  result = state.s0l + state.s3l;
+  result = state.s0 + state.s3;
+  state = next(state);
+  return (result, state);
+}
 
-  t = state.s1l << 17ul;
-
-  state.s2l = state.s2l ^ state.s0l;
-  state.s3l = state.s3l ^ state.s1l;
-  state.s1l = state.s1l ^ state.s2l;
-  state.s0l = state.s0l ^ state.s3l;
-
-  state.s2l = state.s2l ^ t;
-
-  state.s3l = rotl(state.s3l, 45ul);
-
+inline
+ulong[L], struct State256[L] xoshiro256p(struct State256[L] state)
+{
+  result = _add_VxV_(state.s0, state.s3);
+  state = next(state);
   return (result, state);
 }
 
 inline
 ulong, struct State256 xoshiro256ss(struct State256 state)
 {
-  result = rotl(state.s1l * 5ul, 7ul) * 9ul;
-
-  t = state.s1l << 17ul;
-
-  state.s2l = state.s2l ^ state.s0l;
-  state.s3l = state.s3l ^ state.s1l;
-  state.s1l = state.s1l ^ state.s2l;
-  state.s0l = state.s0l ^ state.s3l;
-
-  state.s2l = state.s2l ^ t;
-
-  state.s3l = rotl(state.s3l, 45ul);
-
+  result = rotl(state.s1 * 5ul, 7ul) * 9ul;
+  state = next(state);
   return (result, state);
 }
 
 inline
-uint, struct State128 xoshiro128pp(struct State128 state)
+ulong[L], struct State256[L] xoshiro256ss(struct State256[L] state)
 {
-  result = rotl(state.s0 + state.s3, 7u) + state.s0;
-
-  t = state.s1 << 9u;
-
-  state.s2 = state.s2 ^ state.s0;
-  state.s3 = state.s3 ^ state.s1;
-  state.s1 = state.s1 ^ state.s2;
-  state.s0 = state.s0 ^ state.s3;
-
-  state.s2 = state.s2 ^ t;
-
-  state.s3 = rotl(state.s3, 11u);
-
-  return (result, state);
-}
-
-inline
-uint, struct State128 xoshiro128p(struct State128 state)
-{
-  result = state.s0 + state.s3;
-
-  t = state.s1 << 9u;
-
-  state.s2 = state.s2 ^ state.s0;
-  state.s3 = state.s3 ^ state.s1;
-  state.s1 = state.s1 ^ state.s2;
-  state.s0 = state.s0 ^ state.s3;
-
-  state.s2 = state.s2 ^ t;
-
-  state.s3 = rotl(state.s3, 11u);
-
-  return (result, state);
-}
-
-inline
-uint, struct State128 xoshiro128ss(struct State128 state)
-{
-  result = rotl(state.s1 * 5u, 7u) * 9u;
-
-  t = state.s1 << 9u;
-
-  state.s2 = state.s2 ^ state.s0;
-  state.s3 = state.s3 ^ state.s1;
-  state.s1 = state.s1 ^ state.s2;
-  state.s0 = state.s0 ^ state.s3;
-
-  state.s2 = state.s2 ^ t;
-
-  state.s3 = rotl(state.s3, 11u);
-
+  result = _mul_VxS_(rotl(_mul_VxS_(state.s1, 5ul), 7ul), 9ul);
+  state = next(state);
   return (result, state);
 }
 
@@ -272,7 +243,7 @@ uint, struct State128 xoshiro128ss(struct State128 state)
  * Advance by k * 2^192 states in O(log(k))
  **/
 inline
-struct State256 advancel(struct State256 state, int k)
+struct State256 advance(struct State256 state, int k)
 {
   /* jump[j, .] represents 256 bits that are the coefficients of
    * x^(2^j * 2^192) mod charpoly. */
@@ -317,79 +288,15 @@ struct State256 advancel(struct State256 state, int k)
       for (i = 0; i < 4; i++) {
         for (b = 0; b < 64; b++) {
           if ((_sel_VxA_([kb, i], jump) & (1ul << toul(b))) != 0ul) {
-            s0 = s0 ^ state.s0l;
-            s1 = s1 ^ state.s1l;
-            s2 = s2 ^ state.s2l;
-            s3 = s3 ^ state.s3l;
-          }
-          unused, state = xoshiro256p(state);
-        }
-      }
-      state = State256 { s0, s1, s2, s3 };
-    }
-  }
-
-  return state;
-}
-
-/**
- * Advance by k * 2^96 states in O(log(k))
- **/
-inline
-struct State128 advance(struct State128 state, int k)
-{
-  /* jump[j, .] represents 128 bits that are the coefficients of
-   * x^(2^j * 2^96) mod charpoly. */
-  jump = [
-          [0xb523952eu, 0x0b6f099fu, 0xccf5a0efu, 0x1c580662u],
-          [0xeeb0e0a4u, 0x77133e23u, 0xdc596025u, 0x97f55fe2u],
-          [0x9e9b45acu, 0x6d495900u, 0x69ac41e5u, 0x0356e935u],
-          [0x407883f3u, 0x547d4854u, 0x9065599bu, 0x662b6ac9u],
-          [0x667ee2deu, 0x8a954d8bu, 0x6551c593u, 0x2fcdf7e4u],
-          [0xfb5707aau, 0xdaa2886au, 0xb233cd67u, 0x0f4183cau],
-          [0x40dbcd63u, 0x8e131a4fu, 0x224fc251u, 0xc64784eeu],
-          [0x4f4db4ffu, 0x7b6ea15fu, 0xb29e13b7u, 0x563b1ea7u],
-          [0xbbd3ae5au, 0xebf544e9u, 0xd28ec540u, 0x5ce3332fu],
-          [0xd39c61ebu, 0x1f4dd02eu, 0x95a4e90fu, 0xa9ac90e8u],
-          [0x790c846cu, 0xd428b915u, 0xd2660f23u, 0x725dcd70u],
-          [0x08eff263u, 0xf39ff6c1u, 0x513d8ba0u, 0xca4404cau],
-          [0x26534b4du, 0xcf8db66bu, 0x6102f64bu, 0xf84f07e3u],
-          [0xa88724c5u, 0x0870d7d7u, 0x181f9787u, 0xdc3d5d45u],
-          [0xdba73489u, 0x0df0ec1fu, 0x43005e2eu, 0xd543edf1u],
-          [0x6d73a1e7u, 0xfe43b2a7u, 0xf9a46a20u, 0x58859a86u],
-          [0xa683b6d0u, 0xafc4a733u, 0x1bf94979u, 0xf904dd9fu],
-          [0x2ee03d84u, 0x75c74e3du, 0x96efbfd6u, 0x7d256f6cu],
-          [0x3ad0ebe7u, 0x13f14f31u, 0x796d291cu, 0xa42bbfddu],
-          [0xce04ddb0u, 0x1fc44a96u, 0xb6a00a91u, 0x8a6c4326u],
-          [0x4e519967u, 0x0d7a869eu, 0x40012492u, 0x6dc7c036u],
-          [0x9e4d0a48u, 0x6a86db67u, 0xae852b9bu, 0x6cc51cebu],
-          [0x5a52e97fu, 0x77beacceu, 0xb8030b6cu, 0x5ead7c39u],
-          [0x022cefbeu, 0x7d88e3d4u, 0x858bbdfeu, 0x6b644146u],
-          [0x90067a45u, 0xb7ce03bcu, 0xde4ac3e8u, 0x99853a2cu],
-          [0xe3a7ccf3u, 0x35c9b163u, 0xbb5b8048u, 0x31ac55d8u],
-          [0x8d4a33dbu, 0x169e96efu, 0x3788b4a3u, 0x622cd32eu],
-          [0x0513f190u, 0x06f60339u, 0x93608184u, 0x4576959du],
-          [0x1a64167bu, 0x05c745c5u, 0xe2f50d3au, 0x8abc30fau],
-          [0x1741bb62u, 0x3afd4ba4u, 0xb268faefu, 0x18bf57c6u],
-          [0x39b7b7b9u, 0x31bb1001u, 0xd95f2dccu, 0x5686c6e7u],
-          [0x54d81f7eu, 0x0453f0feu, 0x3bef4345u, 0x9d5e1791u]
-         ];
-
-  for (kb = 0; kb < 32; kb++) {
-    if ((toui(k) & (1u << toui(kb))) != 0u) {
-      s0 = 0u; s1 = 0u; s2 = 0u; s3 = 0u;
-      for (i = 0; i < 4; i++) {
-        for (b = 0; b < 32; b++) {
-          if ((_sel_VxA_([kb, i], jump) & (1u << toui(b))) != 0u) {
             s0 = s0 ^ state.s0;
             s1 = s1 ^ state.s1;
             s2 = s2 ^ state.s2;
             s3 = s3 ^ state.s3;
           }
-          unused, state = xoshiro128p(state);
+          unused, state = xoshiro256p(state);
         }
       }
-      state = State128 { s0, s1, s2, s3 };
+      state = State256 { s0, s1, s2, s3 };
     }
   }
 
@@ -409,15 +316,7 @@ int prod(int[d] shp)
  * solution, but in that case the cost should be negligible anyway.
  **/
 struct State256[d:shp]
-seed_arrl(int[d] shp, struct State256 state)
-{
-  p = prod(shp);
-  flat = {[k] -> advancel(state, k) | [k] < [p]};
-  return reshapel(shp, flat);
-}
-
-struct State128[d:shp]
-seed_arr(int[d] shp, struct State128 state)
+seed_arr(int[d] shp, struct State256 state)
 {
   p = prod(shp);
   flat = {[k] -> advance(state, k) | [k] < [p]};
@@ -427,13 +326,7 @@ seed_arr(int[d] shp, struct State128 state)
 inline
 double to_uniform(ulong x, double a, double b)
 {
-    return a + (b - a) * (tod(x >> 11ul) * 0x1p-53);
-}
-
-inline
-float to_uniform(uint x, float a, float b)
-{
-    return a + (b - a) * (tof(x >> 8u) * tof(0x1p-24));
+    return a + (b - a) * _ulong_as_double_S_(x >> 11ul);
 }
 
 /**
@@ -447,18 +340,6 @@ double, double to_normal(ulong u1, ulong u2, double mean, double stddev)
 
   Z1 = sqrt(-2d * log(U1)) * cos(2d * pi() * U2);
   Z2 = sqrt(-2d * log(U1)) * sin(2d * pi() * U2);
-
-  return (mean + stddev * Z1, mean + stddev * Z2);
-}
-
-inline
-float, float to_normal(uint u1, uint u2, float mean, float stddev)
-{
-  U1 = to_uniform(u1, 0f, 1f);
-  U2 = to_uniform(u2, 0f, 1f);
-
-  Z1 = sqrt(-2f * log(U1)) * cos(2f * tof(pi()) * U2);
-  Z2 = sqrt(-2f * log(U1)) * sin(2f * tof(pi()) * U2);
 
   return (mean + stddev * Z1, mean + stddev * Z2);
 }
@@ -482,16 +363,5 @@ struct State256 srand256()
   s2 = splitmix64(s1);
   s3 = splitmix64(s2);
 
-  return State256 {.s0l = s0, .s1l = s1, .s2l = s2, .s3l = s3};
-}
-
-struct State128 srand128()
-{
-  s0 = srand_time();
-  s1 = splitmix64(s0);
-  s2 = splitmix64(s1);
-  s3 = splitmix64(s2);
-
-  return State128 {.s0 = _toui_S_(s0), .s1 = _toui_S_(s1),
-                   .s2 = _toui_S_(s2), .s3 = _toui_S_(s3)};
+  return State256 {.s0 = s0, .s1 = s1, .s2 = s2, .s3 = s3};
 }

@@ -1,0 +1,366 @@
+/******************************************************************************
+ *
+ * # Introduction
+ *
+ * This module implements pseudo-random number generators (PRNGs) for
+ * Monte-Carlo simulations and related algorithms. As of April 2025,
+ * the Xoshiro family is state of the art. We currently do not offer
+ * cryptographically-secure PRNGS.
+ *
+ * A PRNG is a function [state space] -> [unsigned int type] x [state space]
+ * The unsigned integer can be converted to a real (float or float) of
+ * various distributions.
+ *
+ * # API
+ *
+ * The 64-bit version has an l-suffix to avoid name conflicts.
+ *
+ * ## Basic
+ *
+ * For generating float
+ *    uint, struct State128 xoshiro256p(struct State128 state)
+ *
+ * For generating float
+ *    uint, struct State128 xoshiro128p(struct State128 state)
+ *
+ * An initial state can be generated from the system time with
+ *    struct State128 srand256(void);
+ *    struct State128 srand128(void);
+ *
+ * For reproducible results you can also set the seed manually.
+ *
+ * ## Conversions
+ *
+ * To U(a, b)
+ *    float to_uniform(uint x, float a, float b)
+ *    float  to_uniform(uint  x, float  a, float  b)
+ *
+ * To N(mean, stddev). Works in pairs to map efficiently to Box-Muller.
+ *    float, float to_normal(uint u1, uint u2, float mean, float stddev)
+ *    float , float  to_normal(uint  u1, uint  u2, float  mean, float  stddev)
+ *
+ * ## Multithreading
+ *
+ * For parallel exeuction, we can generate an array of
+ * states that are 2^192, 2^96 apart
+ * This can be created with
+ *
+ *    struct State128[d:shp] seed_arrl(int[d] shp, struct State128 state)
+ *    struct State128[d:shp] seed_arr (int[d] shp, struct State128 state)
+ *
+ * You can then use reshape-ing techniques. For example if we have p threads
+ * and we want to add normally distributed numbers to an array:
+ *
+ * inline
+ * float[n], struct State128 add_normal(float[n] x, struct State128 state)
+ * {
+ *    for (i = 0; i + 1 < n; i += 2) {
+ *      u1, state = xoshiro256p(state);
+ *      u2, state = xoshiro256p(state);
+ *      N1, N2 = to_normal(u1, u2, 0d, 1d);
+ *      x[i]     = N1;
+ *      x[i + 1] = N2;
+ *    }
+ *    if (n % 2 != 0) {
+ *      u1, state = xoshiro256p(state);
+ *      u2, state = xoshiro256p(state);
+ *      N1, N2 = to_normal(u1, u2, 0d, 1d);
+ *      x[n - 1] = N1;
+ *    }
+ *    return (x, state);
+ * }
+ *
+ * states       = seed_arrl([p], state);
+ * x_2d         = reshape([p, n / p], x);
+ * x_2d, states = {[i] -> add_normal(x[i], states[i]) | [i] < [p]};
+ * x            = reshape([n], x_2d);
+ * state        = states[0];
+ *
+ ******************************************************************************/
+#pragma safe
+module Xoshiro128;
+
+use ScalarArith: all;
+use Math: all;
+
+export all except { rotl, splitmix64, srand_time, to_row_major,
+                    reshape, prod };
+
+struct State128 {
+  uint s0;
+  uint s1;
+  uint s2;
+  uint s3;
+};
+
+//struct State128 sel(int[d] iv, struct State128[d:shp] x)
+//{
+//    return _sel_VxA_(iv, x);
+//}
+//
+//
+//struct State128 sel(int i, struct State128[n] x)
+//{
+//    return _sel_VxA_([i], x);
+//}
+//
+//inline 
+//struct State128[i:ishp] sel(int[o] idx, struct State128[o:oshp,i:ishp] arr)
+//    | _all_V_(_le_SxV_(0, idx)), _all_V_(_lt_VxV_(idx, oshp))
+//{
+//    return {iv -> _sel_VxA_(_cat_VxV_(idx, iv), arr) | iv < ishp};
+//}
+//
+//inline 
+//struct State128[d:shp] sel(int idx, struct State128[n,d:shp] arr)
+//    | _le_SxS_(0, idx), _lt_SxS_(idx, n)
+//{
+//    return sel([idx], arr);
+//}
+
+inline
+int to_row_major(int[d] iv, int[d] shp)
+{
+  res = _sel_VxA_([0], iv);
+  l = 1;
+  while (l < d) {
+    res = res * _sel_VxA_([l], shp) + _sel_VxA_([l], iv);
+    l   = l + 1;
+  }
+  return res;
+}
+
+struct State128[d:shp]
+reshape(int[d] shp, struct State128[n] x)
+{
+#if 0
+  /* Not yet supported on structs. */
+  return _reshape_VxA_(new_shp, x);
+#else
+  res = {iv -> _sel_VxA_([to_row_major(iv, shp)], x) | iv < shp};
+  return res;
+#endif
+}
+
+inline
+uint rotl(uint x, uint k)
+{
+  return (x << k) | (x >> (32u - k));
+}
+
+inline
+uint[L] rotl(uint[L] x, uint k)
+{
+  return _bitxor_VxV_(_shl_VxS_(x, k),
+                      _shr_VxS_(x, 32u - k));
+}
+
+inline
+struct State128 next(struct State128 state)
+{
+  t = state.s1 << 9u;
+
+  state.s2 = state.s2 ^ state.s0;
+  state.s3 = state.s3 ^ state.s1;
+  state.s1 = state.s1 ^ state.s2;
+  state.s0 = state.s0 ^ state.s3;
+
+  state.s2 = state.s2 ^ t;
+
+  state.s3 = rotl(state.s3, 11u);
+
+  return state;
+}
+
+inline
+struct State128[L] next(struct State128[L] state)
+{
+  t = _shl_VxS_(state.s1, 9u);
+
+  state.s2 = _bitxor_VxV_(state.s2, state.s0);
+  state.s3 = _bitxor_VxV_(state.s3, state.s1);
+  state.s1 = _bitxor_VxV_(state.s1, state.s2);
+  state.s0 = _bitxor_VxV_(state.s0, state.s3);
+
+  state.s2 = _bitxor_VxV_(state.s2, t);
+
+  state.s3 = rotl(state.s3, 11u);
+
+  return state;
+}
+
+inline
+uint, struct State128 xoshiro128pp(struct State128 state)
+{
+  result = rotl(state.s0 + state.s3, 7u) + state.s0;
+  state = next(state);
+  return (result, state);
+}
+
+inline
+uint[L], struct State128[L] xoshiro128pp(struct State128[L] state)
+{
+  result = _add_VxV_(rotl(_add_VxV_(state.s0, state.s3), 7u), state.s0);
+  state = next(state);
+  return (result, state);
+}
+
+inline
+uint, struct State128 xoshiro128p(struct State128 state)
+{
+  result = state.s0 + state.s3;
+  state = next(state);
+  return (result, state);
+}
+
+inline
+uint[L], struct State128[L] xoshiro128p(struct State128[L] state)
+{
+  result = _add_VxV_(state.s0, state.s3);
+  state = next(state);
+  return (result, state);
+}
+
+inline
+uint, struct State128 xoshiro128ss(struct State128 state)
+{
+  result = rotl(state.s1 * 5u, 7u) * 9u;
+  state = next(state);
+  return (result, state);
+}
+
+inline
+uint[L], struct State128[L] xoshiro128ss(struct State128[L] state)
+{
+  result = _mul_VxS_(rotl(_mul_VxS_(state.s1, 5u), 7u), 9u);
+  state = next(state);
+  return (result, state);
+}
+
+/**
+ * Advance by k * 2^96 states in O(log(k))
+ **/
+inline
+struct State128 advance(struct State128 state, int k)
+{
+  /* jump[j, .] represents 128 bits that are the coefficients of
+   * x^(2^j * 2^96) mod charpoly. */
+  jump = [
+          [0xb523952eu, 0x0b6f099fu, 0xccf5a0efu, 0x1c580662u],
+          [0xeeb0e0a4u, 0x77133e23u, 0xdc596025u, 0x97f55fe2u],
+          [0x9e9b45acu, 0x6d495900u, 0x69ac41e5u, 0x0356e935u],
+          [0x407883f3u, 0x547d4854u, 0x9065599bu, 0x662b6ac9u],
+          [0x667ee2deu, 0x8a954d8bu, 0x6551c593u, 0x2fcdf7e4u],
+          [0xfb5707aau, 0xdaa2886au, 0xb233cd67u, 0x0f4183cau],
+          [0x40dbcd63u, 0x8e131a4fu, 0x224fc251u, 0xc64784eeu],
+          [0x4f4db4ffu, 0x7b6ea15fu, 0xb29e13b7u, 0x563b1ea7u],
+          [0xbbd3ae5au, 0xebf544e9u, 0xd28ec540u, 0x5ce3332fu],
+          [0xd39c61ebu, 0x1f4dd02eu, 0x95a4e90fu, 0xa9ac90e8u],
+          [0x790c846cu, 0xd428b915u, 0xd2660f23u, 0x725dcd70u],
+          [0x08eff263u, 0xf39ff6c1u, 0x513d8ba0u, 0xca4404cau],
+          [0x26534b4du, 0xcf8db66bu, 0x6102f64bu, 0xf84f07e3u],
+          [0xa88724c5u, 0x0870d7d7u, 0x181f9787u, 0xdc3d5d45u],
+          [0xdba73489u, 0x0df0ec1fu, 0x43005e2eu, 0xd543edf1u],
+          [0x6d73a1e7u, 0xfe43b2a7u, 0xf9a46a20u, 0x58859a86u],
+          [0xa683b6d0u, 0xafc4a733u, 0x1bf94979u, 0xf904dd9fu],
+          [0x2ee03d84u, 0x75c74e3du, 0x96efbfd6u, 0x7d256f6cu],
+          [0x3ad0ebe7u, 0x13f14f31u, 0x796d291cu, 0xa42bbfddu],
+          [0xce04ddb0u, 0x1fc44a96u, 0xb6a00a91u, 0x8a6c4326u],
+          [0x4e519967u, 0x0d7a869eu, 0x40012492u, 0x6dc7c036u],
+          [0x9e4d0a48u, 0x6a86db67u, 0xae852b9bu, 0x6cc51cebu],
+          [0x5a52e97fu, 0x77beacceu, 0xb8030b6cu, 0x5ead7c39u],
+          [0x022cefbeu, 0x7d88e3d4u, 0x858bbdfeu, 0x6b644146u],
+          [0x90067a45u, 0xb7ce03bcu, 0xde4ac3e8u, 0x99853a2cu],
+          [0xe3a7ccf3u, 0x35c9b163u, 0xbb5b8048u, 0x31ac55d8u],
+          [0x8d4a33dbu, 0x169e96efu, 0x3788b4a3u, 0x622cd32eu],
+          [0x0513f190u, 0x06f60339u, 0x93608184u, 0x4576959du],
+          [0x1a64167bu, 0x05c745c5u, 0xe2f50d3au, 0x8abc30fau],
+          [0x1741bb62u, 0x3afd4ba4u, 0xb268faefu, 0x18bf57c6u],
+          [0x39b7b7b9u, 0x31bb1001u, 0xd95f2dccu, 0x5686c6e7u],
+          [0x54d81f7eu, 0x0453f0feu, 0x3bef4345u, 0x9d5e1791u]
+         ];
+
+  for (kb = 0; kb < 32; kb++) {
+    if ((toui(k) & (1u << toui(kb))) != 0u) {
+      s0 = 0u; s1 = 0u; s2 = 0u; s3 = 0u;
+      for (i = 0; i < 4; i++) {
+        for (b = 0; b < 32; b++) {
+          if ((_sel_VxA_([kb, i], jump) & (1u << toui(b))) != 0u) {
+            s0 = s0 ^ state.s0;
+            s1 = s1 ^ state.s1;
+            s2 = s2 ^ state.s2;
+            s3 = s3 ^ state.s3;
+          }
+          unused, state = xoshiro128p(state);
+        }
+      }
+      state = State128 { s0, s1, s2, s3 };
+    }
+  }
+
+  return state;
+}
+
+int prod(int[d] shp)
+{
+  return with {
+    ([0] <= iv < [d]): _sel_VxA_(iv, shp);
+  }: fold(*, 1);
+}
+
+/**
+ * O(p log(p)) and embarassingly parallel.
+ * For small amount of parallelism, this is slower than the naive O(p)
+ * solution, but in that case the cost should be negligible anyway.
+ **/
+struct State128[d:shp]
+seed_arr(int[d] shp, struct State128 state)
+{
+  p = prod(shp);
+  flat = {[k] -> advance(state, k) | [k] < [p]};
+  return reshape(shp, flat);
+}
+
+inline
+float to_uniform(uint x, float a, float b)
+{
+    return a + (b - a) * _uint_as_float_S_(x >> 8u);
+}
+
+/**
+ * Box-Muller transform
+ **/
+inline
+float, float to_normal(uint u1, uint u2, float mean, float stddev)
+{
+  U1 = to_uniform(u1, 0f, 1f);
+  U2 = to_uniform(u2, 0f, 1f);
+
+  Z1 = sqrt(-2f * log(U1)) * cos(2f * fl_pi() * U2);
+  Z2 = sqrt(-2f * log(U1)) * sin(2f * fl_pi() * U2);
+
+  return (mean + stddev * Z1, mean + stddev * Z2);
+}
+
+ulong splitmix64(ulong x)
+{
+  x = x + 11400714819323198485ul;
+  z = (x ^ (x >> 30ul)) * 13787848793156543929ul;
+  z = (z ^ (z >> 27ul)) * 10723151780598845931ul;
+  return z ^ (z >> 31ul);
+}
+
+external ulong srand_time();
+  #pragma linkname "SAC_srand_time"
+  #pragma linkobj "src/Xoshiro.o"
+
+struct State128 srand128()
+{
+  s0 = srand_time();
+  s1 = splitmix64(s0);
+  s2 = splitmix64(s1);
+  s3 = splitmix64(s2);
+
+  return State128 {.s0 = _toui_S_(s0), .s1 = _toui_S_(s1),
+                   .s2 = _toui_S_(s2), .s3 = _toui_S_(s3)};
+}

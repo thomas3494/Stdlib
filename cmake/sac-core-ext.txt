@@ -19,7 +19,8 @@ numerical/MathArray.sac                    Core
 numerical/Numerical.sac                    Core
 
 # Random
-random/Xoshiro.sac                         Core
+random/Xoshiro256.sac                      Core
+random/Xoshiro128.sac                      Core
 
 # StdIO
 stdio/ArrayIO.xsac                         Core
